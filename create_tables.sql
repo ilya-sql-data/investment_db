@@ -51,3 +51,14 @@ create table cash_transactions (
     currency char(3) not null DEFAULT 'RUB',
     comment TEXT
 );
+
+-- таблица для подсчета рыночной стоимости и P&L
+create table prices (
+    price_id bigserial primary key,
+    asset_id bigint not null references assets(asset_id),
+    price_date date not null DEFAULT now(),
+    close_price numeric(18,6) not null,
+    currency char(3) not null default 'RUB',
+    source_name text,
+    unique (asset_id, price_date)
+);
