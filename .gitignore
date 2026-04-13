@@ -1,2 +1,3 @@
 main.sql
 .DS_Store
+__pycache__/
