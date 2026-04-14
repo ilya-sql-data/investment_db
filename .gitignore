@@ -1,3 +1,5 @@
 main.sql
 .DS_Store
 __pycache__/
+load_prices.err.log
+load_prices.out.log
