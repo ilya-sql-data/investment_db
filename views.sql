@@ -60,10 +60,20 @@ HAVING sum(case when t.side = 'BUY' then t.quantity else -t.quantity end) > 0;
 -- Текущая рыночная витрина по портфелю.
 -- Беру последнюю доступную цену из prices и считаю:
 -- cost_basis, market_value и unrealized_pnl.
--- Сейчас расчет unrealized_pnl опирается на avg_buy_price из старой логики,
--- поэтому после перехода на WAC этот view нужно будет пересобрать.
 create MATERIALIZED VIEW v_portfolio_current as 
-with latest_prices as (
+with latest_wac as (
+    select distinct on (account_id, asset_id)
+        account_id
+        , asset_id
+        , qty_after
+        , cost_after
+        , avg_cost_after
+        , trade_date
+        , trade_id
+    from v_trade_wac
+    order by account_id, asset_id, trade_date desc, trade_id desc
+),
+latest_prices as (
     select distinct on (asset_id)
         asset_id
         , price_date
@@ -71,18 +81,21 @@ with latest_prices as (
     from prices
     order by asset_id, price_date desc
 )
-SELECT pos.account_id
-    , pos.asset_id
-    , pos.ticker
-    , pos.asset_type
-    , pos.position_qty
-    , pos.avg_buy_price
+SELECT lw.account_id
+    , a.asset_name
+    , a.ticker
+    , a.asset_type
+    , lw.qty_after as position_qty
+    , lw.avg_cost_after as avg_buy_price
+    , lw.cost_after as cost_basis
     , lp.close_price as market_price
-    , pos.avg_buy_price * pos.position_qty as cost_basis
-    , pos.position_qty * lp.close_price as market_value
-    , pos.position_qty * (lp.close_price - pos.avg_buy_price) as unrealized_pnl
-from v_positions_with_avg_price as pos
-join latest_prices as lp using(asset_id);
+    , lw.qty_after * lp.close_price as market_value
+    , (lw.qty_after * lp.close_price) - lw.cost_after as unrealized_pnl
+from latest_wac as lw
+join assets as a using(asset_id)
+join latest_prices as lp using(asset_id)
+where lw.qty_after > 0
+order by unrealized_pnl desc;
 
 -- Доли бумаг в текущем портфеле по рыночной стоимости.
 -- Сначала считаю market_value по каждой позиции,
@@ -91,7 +104,7 @@ join latest_prices as lp using(asset_id);
 create MATERIALIZED VIEW v_portfolio_weights as
 with portfolio as (
     select account_id
-        , asset_id
+        , asset_name
         , ticker
         , position_qty
         , avg_buy_price
@@ -141,7 +154,7 @@ select trade_id
         when side = 'SELL' then - quantity
         else 0
     end as trade_flow
-from trades
+from trades;
 
 -- Накопительная позиция по каждой бумаге в хронологическом порядке.
 -- running_qty_before показывает остаток до сделки.
@@ -154,7 +167,7 @@ select fb.*,
         rows between unbounded preceding and current row) as running_qty_after,
     sum(trade_flow) over(partition by account_id, asset_id order by trade_date, trade_id
         rows between unbounded preceding and current row) - trade_flow as runnung_qty_before 
-from "public"."v_trade_flow_base" fb
+from "public"."v_trade_flow_base" fb;
 
 -- Основной расчетный слой WAC по каждой сделке.
 -- Здесь я последовательно прохожу сделки в хронологическом порядке
@@ -219,7 +232,7 @@ with recursive ordered_trades as (
         end) as qty_after
         -- оставшая себестоимость
         , round(case when t.side = 'SELL' and w.qty_after - t.quantity = 0 then 0
-                when t.side = 'SELL' then w.cost_after - (t.quantity * (t.quantity * t.price) / nullif(t.quantity, 0))
+                when t.side = 'SELL' then w.cost_after - (t.quantity * (w.cost_after / nullif(w.qty_after, 0)))
                     else w.cost_after + (t.quantity * t.price)
         end,2) as cost_after
     from wac w
@@ -253,4 +266,4 @@ select *
     , case when side = 'SELL' then round((price - avg_cost_before) * quantity,2) 
         else 0
     end as realized_pnl
-from wac_before
+from wac_before;
