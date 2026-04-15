@@ -32,6 +32,27 @@ def map_market(asset_type: str) -> str:
         raise ValueError(f"Неизвестный asset_type: {asset_type}")
     return mapping[asset_type]
 
+def fetch_bond_face_value(secid: str):
+    url = f"{MOEX_BASE_URL}/securities/{secid}.json"
+    params = {"iss.meta": "off"}
+
+    resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    payload = resp.json()
+
+    description = payload.get("description", {})
+    columns = description.get("columns", [])
+    rows = description.get("data", [])
+
+    for row in rows:
+        item = dict(zip(columns, row))
+        if item.get("name") == "FACEVALUE":
+            value = item.get("value")
+            if value is not None:
+                return float(value)
+
+    return None
+
 
 def fetch_assets(conn):
     # выбираю только те активы, по которым реально могу сходить в MOEX:
@@ -120,7 +141,7 @@ def fetch_candles(secid: str, board_id: str, market: str, from_date: date, till_
     return all_rows
 
 
-def normalize_close_price(candle: dict):
+def normalize_close_price(candle: dict, asset_type: str, face_value: float | None = None):
     # Беру только дату и цену закрытия
     close_price = candle.get("close")
     begin_ts = candle.get("begin")
@@ -128,6 +149,11 @@ def normalize_close_price(candle: dict):
     if close_price is None or begin_ts is None:
         # Если в свече нет ключевых полей, такую запись пропускаю.
         return None
+    
+    if asset_type == "bond" and face_value is not None:
+        close_price = float(close_price) * face_value / 100
+    else:
+        close_price = float(close_price)
 
     price_date = datetime.fromisoformat(begin_ts.replace("Z", "")).date()
     return price_date, float(close_price)
@@ -189,11 +215,15 @@ def load_history(days_back: int = 365):
                     from_date=from_date,
                     till_date=till_date,
                 )
+                
+                face_value = None
+                if asset["asset_type"] == "bond":
+                    face_value = fetch_bond_face_value(asset["moex_secid"])
 
                 normalized = []
                 for candle in candles:
                     # На этом шаге фильтрую и нормализую только пригодные свечи.
-                    item = normalize_close_price(candle)
+                    item = normalize_close_price(candle, asset["asset_type"], face_value)
                     if item is not None:
                         normalized.append(item)
 
@@ -242,9 +272,13 @@ def load_latest():
                     till_date=till_date,
                 )
 
+                face_value = None
+                if asset["asset_type"] == "bond":
+                    face_value = fetch_bond_face_value(asset["moex_secid"])
+
                 normalized = []
                 for candle in candles:
-                    item = normalize_close_price(candle)
+                    item = normalize_close_price(candle, asset["asset_type"], face_value)
                     if item is not None:
                         normalized.append(item)
 
