@@ -46,7 +46,9 @@ create table cash_transactions (
     asset_id bigint REFERENCES assets(asset_id),
     txn_date date not null,
     txn_type text not null check(txn_type in ('Пополнение', 'Вывод', 'Налог','Дивиденды','Купон')),
-    amount numeric(18,6) not null check(amount > 0),
+    -- amount хранит signed value денежного движения:
+    -- пополнения и доходы обычно положительные, выводы и налоги отрицательные.
+    amount numeric(18,6) not null,
     commission numeric(18,6) not null DEFAULT 0,
     currency char(3) not null DEFAULT 'RUB',
     comment TEXT

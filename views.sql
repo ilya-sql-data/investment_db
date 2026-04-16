@@ -1,5 +1,6 @@
 -- Обновляю materialized views после загрузки новых данных.
 -- Запускать этот блок имеет смысл после обновления trades / cash_transactions / prices.
+-- Для обычных VIEW refresh не нужен: их определение пересчитывается на лету.
 REFRESH MATERIALIZED VIEW v_cash_balance;
 REFRESH MATERIALIZED VIEW v_portfolio_current;
 REFRESH MATERIALIZED VIEW v_portfolio_weights;
@@ -60,6 +61,8 @@ HAVING sum(case when t.side = 'BUY' then t.quantity else -t.quantity end) > 0;
 -- Текущая рыночная витрина по портфелю.
 -- Беру последнюю доступную цену из prices и считаю:
 -- cost_basis, market_value и unrealized_pnl.
+-- Основа этой витрины уже переведена на v_trade_wac,
+-- поэтому avg_buy_price здесь фактически означает WAC avg_cost_after.
 create MATERIALIZED VIEW v_portfolio_current as 
 with latest_wac as (
     select distinct on (account_id, asset_id)
@@ -126,16 +129,56 @@ select p.*
 from portfolio p
 join totals t using(account_id);
 
--- Остаток денежных средств по счету.
--- Пока здесь учитываются только cash_transactions по типам
--- "Дивиденды" и "Купон".
--- Сделки, комиссии, налоги и прочие движения денег сюда пока не включены.
-create MATERIALIZED VIEW v_cash_balance as 
+-- Денежный поток по сделкам.
+-- BUY уменьшает cash на сумму сделки и комиссию,
+-- SELL увеличивает cash на сумму продажи за вычетом комиссии.
+create view v_trade_cash_flow as 
+select trade_id
+    , account_id
+    , asset_id
+    , trade_date
+    , trade_currency
+    , side
+    , quantity
+    , price
+    , round(quantity * price, 2) as trade_amount
+    , round(case
+        when side = 'BUY' then -((quantity*price) + coalesce(commission,0)) 
+        when side = 'SELL' then (quantity*price) - coalesce(commission,0)
+        else 0
+    end,2) as cash_flow_amount
+from trades;
+
+-- Единый журнал денежных движений по счету.
+-- Объединяю денежную сторону сделок и cash_transactions,
+-- чтобы дальше считать cash_balance из одного источника.
+create view v_cash_ledger as 
 select account_id
+    , trade_date as cash_date
+    , trade_currency
+    , 'trade' as source_type
+    , side as operation_type
+    , cash_flow_amount as amount
+from v_trade_cash_flow
+
+union all
+
+select account_id
+    , txn_date
     , currency
-    , sum(amount) filter(where txn_type in('Дивиденды', 'Купон')) as cash_balance
-from cash_transactions
-GROUP BY 1,2;
+    , 'cash_transaction'
+    , txn_type
+    , amount - coalesce(commission,0) as amount
+from cash_transactions;
+
+-- Итоговый денежный остаток по счету и валюте.
+-- Это сумма всех денежных движений из cash ledger.
+create materialized view v_cash_balance as
+select account_id
+    , trade_currency
+    , round(sum(amount),2) as cash_balance
+from v_cash_ledger
+group by 1,2;
 
 -- Базовый поток сделок для дальнейших расчетов.
 -- Я нормализую сделки в единый поток:
@@ -267,3 +310,65 @@ select *
         else 0
     end as realized_pnl
 from wac_before;
+
+-- Реализованный P&L по каждой сделке продажи.
+-- Это самый детальный слой realized результата:
+-- одна строка = одна продажа из v_trade_wac.
+create view v_realized_pnl_trades as 
+select w.trade_id
+    , w.account_id
+    , w.asset_id
+    , a.asset_name
+    , a.ticker
+    , w.trade_date
+    , w.quantity
+    , w.price as sell_price
+    , w.avg_cost_before
+    , w.realized_pnl
+from v_trade_wac w
+join assets a using(asset_id)
+where w.side = 'SELL';
+
+-- Агрегированный realized P&L по бумаге внутри счета.
+-- Нужен для ответа на вопрос:
+-- на каких инструментах уже зафиксирована прибыль или убыток.
+create view v_realized_pnl_by_asset as 
+select account_id
+    , asset_id
+    , ticker
+    , asset_name
+    , count(*) as sell_trades_count
+    , round(sum(realized_pnl),2) as total_realized_pnl
+from v_realized_pnl_trades
+group by account_id
+    , asset_id
+    , ticker
+    , asset_name;
+
+-- Агрегированный realized P&L на уровне счета.
+-- Это верхнеуровневая сводка по уже закрытому результату.
+create view v_realized_pnl_by_account as 
+select account_id
+    , count(*) as sell_trades_count
+    , round(sum(realized_pnl),2) as total_realized_pnl
+from v_realized_pnl_trades
+group by 1;
+
+-- Сводная P&L-витрина по счету.
+-- Объединяю текущую нереализованную переоценку портфеля
+-- и уже зафиксированный realized P&L по продажам.
+create view v_pnl_summary_by_account as
+with unrealized as (
+    select account_id
+        , round(sum(market_value),2) as total_market_value
+        , round(sum(unrealized_pnl),2) as total_unrealized_pnl
+    from v_portfolio_current
+    group by 1
+)
+select u.account_id
+    , u.total_market_value
+    , u.total_unrealized_pnl
+    , coalesce(r.total_realized_pnl,0) as total_realized_pnl
+    , round(u.total_unrealized_pnl + coalesce(r.total_realized_pnl,0),2) as total_pnl
+from unrealized u
+left join v_realized_pnl_by_account r using(account_id);

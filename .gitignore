@@ -3,3 +3,4 @@ main.sql
 __pycache__/
 load_prices.err.log
 load_prices.out.log
+VIEWS_GUIDE.local.md
