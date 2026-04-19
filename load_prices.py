@@ -192,15 +192,24 @@ def upsert_prices(conn, asset_id: int, rows, source_name: str = "MOEX"):
     conn.commit()
     return len(payload)
 
+def log(message: str, is_error: bool = False):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    output = f"[{timestamp}] {message}"
+    if is_error:
+        print(output, file=sys.stderr)
+    else:
+        print(output)
 
 def load_history(days_back: int = 365):
     # В этом режиме загружаю историю за указанное количество дней.
     from_date = date.today() - timedelta(days=days_back)
     till_date = date.today()
 
+    log(f"Стар загрузки history за {days_back} дней: {from_date} -> {till_date}")
+
     with get_db_connection() as conn:
         assets = fetch_assets(conn)
-        print(f"Найдено активов: {len(assets)}")
+        log(f"Найдено активов: {len(assets)}")
 
         total_loaded = 0
 
@@ -230,7 +239,7 @@ def load_history(days_back: int = 365):
                 loaded = upsert_prices(conn, asset["asset_id"], normalized)
                 total_loaded += loaded
 
-                print(
+                log(
                     f"[OK] {asset['ticker']} ({asset['moex_secid']}, {market}, {asset['board_id']}) "
                     f"-> {loaded} записей"
                 )
@@ -239,12 +248,12 @@ def load_history(days_back: int = 365):
 
             except Exception as e:
                 # Ошибка по одной бумаге не должна останавливать всю загрузку.
-                print(
+                log(
                     f"[ERROR] {asset['ticker']} ({asset['moex_secid']}) -> {e}",
-                    file=sys.stderr
+                    is_error = True
                 )
 
-        print(f"Всего загружено/обновлено строк: {total_loaded}")
+        log(f"Всего загружено/обновлено строк: {total_loaded}")
 
 
 def load_latest():
@@ -255,9 +264,11 @@ def load_latest():
     from_date = date.today() - timedelta(days=10)
     till_date = date.today()
 
+    log(f"Стар загрузки latest: {from_date} -> {till_date}")
+
     with get_db_connection() as conn:
         assets = fetch_assets(conn)
-        print(f"Найдено активов: {len(assets)}")
+        log(f"Найдено активов: {len(assets)}")
 
         total_loaded = 0
 
@@ -292,7 +303,7 @@ def load_latest():
 
                 total_loaded += loaded
 
-                print(
+                log(
                     f"[OK] latest {asset['ticker']} ({asset['moex_secid']}, {market}, {asset['board_id']}) "
                     f"-> {loaded} запись"
                 )
@@ -300,20 +311,20 @@ def load_latest():
                 time.sleep(SLEEP_BETWEEN_REQUESTS)
 
             except Exception as e:
-                print(
+                log(
                     f"[ERROR] latest {asset['ticker']} ({asset['moex_secid']}) -> {e}",
-                    file=sys.stderr
+                    is_error = True
                 )
 
-        print(f"Всего загружено/обновлено последних цен: {total_loaded}")
+        log(f"Всего загружено/обновлено последних цен: {total_loaded}")
 
 
 if __name__ == "__main__":
     # Ожидаю режим запуска из командной строки: history или latest.
     if len(sys.argv) < 2:
-        print("Использование:")
-        print("  python load_prices.py history [days_back]")
-        print("  python load_prices.py latest")
+        log("Использование:")
+        log("  python load_prices.py history [days_back]")
+        log("  python load_prices.py latest")
         sys.exit(1)
 
     mode = sys.argv[1].lower()
