@@ -143,8 +143,8 @@ select trade_id
     , price
     , round(quantity * price, 2) as trade_amount
     , round(case
-        when side = 'BUY' then -((quantity*price) + coalesce(commission,0)) 
-        when side = 'SELL' then (quantity*price) - coalesce(commission,0)
+        when side = 'BUY' then -((quantity*price) + accrued_interest + coalesce(commission,0)) 
+        when side = 'SELL' then ((quantity*price) + accrued_interest) - coalesce(commission,0)
         else 0
     end,2) as cash_flow_amount
 from trades;
@@ -168,7 +168,7 @@ select account_id
     , currency
     , 'cash_transaction'
     , txn_type
-    , amount - coalesce(commission,0) as amount
+    , amount - commission as amount
 from cash_transactions;
 
 -- Итоговый денежный остаток по счету и валюте.
