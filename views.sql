@@ -185,6 +185,7 @@ group by 1,2;
 -- BUY -> положительное количество
 -- SELL -> отрицательное количество
 -- Этот view нужен как исходный слой для running position и WAC.
+drop view v_trade_flow_base cascade
 create  VIEW v_trade_flow_base as
 select trade_id
     , account_id
@@ -193,6 +194,7 @@ select trade_id
     , side
     , quantity
     , price
+    , commission
     , case when side = 'BUY' then quantity
         when side = 'SELL' then - quantity
         else 0
@@ -237,6 +239,7 @@ with recursive ordered_trades as (
         , side
         , quantity
         , price
+        , commission
     from v_trade_flow_base
 ),
  wac as (
@@ -249,9 +252,10 @@ with recursive ordered_trades as (
         , trade_date
         , side
         , quantity
+        , commission
         , round(price,2) as price
         , round(quantity::numeric(18,6)) as qty_after
-        , round(quantity * price,2) as cost_after
+        , round((quantity * price) + coalesce(commission,0),2) as cost_after
     from ordered_trades
     where rn = 1
 
@@ -268,6 +272,7 @@ with recursive ordered_trades as (
         , t.trade_date
         , t.side
         , t.quantity
+        , t.commission
         , round(t.price,2) as price
         -- количество бумаги после сделки
         , round(case when t.side = 'BUY' then (w.qty_after + t.quantity)::numeric(18,6)
@@ -276,7 +281,7 @@ with recursive ordered_trades as (
         -- оставшая себестоимость
         , round(case when t.side = 'SELL' and w.qty_after - t.quantity = 0 then 0
                 when t.side = 'SELL' then w.cost_after - (t.quantity * (w.cost_after / nullif(w.qty_after, 0)))
-                    else w.cost_after + (t.quantity * t.price)
+                    else w.cost_after + (t.quantity * t.price) + coalesce(t.commission,0)
         end,2) as cost_after
     from wac w
     join ordered_trades t
@@ -306,7 +311,7 @@ wac_before as (
 -- Для SELL считаю realized_pnl,
 -- для BUY realized_pnl = 0.
 select *
-    , case when side = 'SELL' then round((price - avg_cost_before) * quantity,2) 
+    , case when side = 'SELL' then round(((price * quantity) - commission) - (avg_cost_before * quantity),2) 
         else 0
     end as realized_pnl
 from wac_before;
@@ -372,3 +377,54 @@ select u.account_id
     , round(u.total_unrealized_pnl + coalesce(r.total_realized_pnl,0),2) as total_pnl
 from unrealized u
 left join v_realized_pnl_by_account r using(account_id);
+
+-- Доходный слой на уровне счета.
+-- Показывает денежный income по дивидендам и купонам,
+-- а также удержания и комиссии по счету.
+create view v_income_by_account as 
+select account_id
+    , round(sum(case when txn_type = 'Дивиденды' then amount else 0 end),2) as dividend_income
+    , round(sum(case when txn_type = 'Купон' then amount else 0 end),2) as coupon_income
+    , round(sum(case when txn_type = 'Налог' then amount else 0 end),2) as tax_amount
+    , round(sum(commission),2) as total_commission
+    , round(sum(case when txn_type in ('Дивиденды', 'Купон') then amount else 0 end)
+        + sum(case when txn_type = 'Налог' then amount else 0 end)
+        - sum(commission),2) as net_income 
+from cash_transactions
+group by 1
+
+-- Доходный слой на уровне актива.
+-- Нужен, чтобы увидеть, какие бумаги приносят dividend/coupon income
+-- и какой net income остается после удержаний.
+create view v_income_by_asset as
+select ct.account_id
+    , ct.asset_id
+    , a.asset_name
+    , a.ticker
+    , round(sum(case when ct.txn_type = 'Дивиденды' then ct.amount else 0 end),2) as dividend_income
+    , round(sum(case when ct.txn_type = 'Купон' then ct.amount else 0 end),2) as coupon_income
+    , round(sum(case when ct.txn_type = 'Налог' then ct.amount else 0 end),2) as tax_amount
+    , round(sum(ct.commission),2) as total_commission
+    , round(sum(case when ct.txn_type in ('Дивиденды', 'Купон') then amount else 0 end)
+        + sum(case when ct.txn_type = 'Налог' then ct.amount else 0 end)
+        - sum(ct.commission),2) as net_income 
+from cash_transactions ct
+left join assets a using(asset_id)
+where ct.asset_id is not null
+group by 1,2,3,4
+order by net_income desc
+
+-- Расширенная сводка по счету.
+-- Объединяет рыночную стоимость портфеля, свободные деньги,
+-- P&L и income в одной витрине верхнего уровня.
+create view v_account_summary as 
+select p.account_id
+    , p.total_market_value
+    , c.cash_balance
+    , p.total_realized_pnl
+    , p.total_pnl
+    , i.net_income
+    , round(p.total_market_value + c.cash_balance,2) as total_account_value
+from v_pnl_summary_by_account p
+left join v_cash_balance c on c.account_id = p.account_id
+left join v_income_by_account i on i.account_id = p.account_id
