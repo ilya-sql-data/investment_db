@@ -50,11 +50,37 @@ where ticker = 'SBER';
 
 insert into cash_transactions (
     account_id,
+    asset_id,
     txn_date,
     txn_type,
-    amount,
-    currency,
-    comment
+    amount
 )
-values
-    (1, '2024-01-01', 'deposit', 10000, 'RUB', 'Первое пополнение счета');
+select 1, asset_id, '2026-04-28', 'Дивиденды', 378
+from assets 
+where asset_name = 'ОФЗ';
+
+
+-- Тестовая загрузка snapshot на текущую дату.
+-- Источник данных: верхнеуровневые summary views по счету и P&L.
+insert into portfolio_snapshot_daily (
+    snapshot_date,
+    account_id,
+    market_value,
+    cash_balance,
+    total_account_value,
+    unrealized_pnl,
+    realized_pnl,
+    net_income
+)
+select
+    current_date as snapshot_date,
+    a.account_id,
+    a.total_market_value as market_value,
+    a.cash_balance,
+    a.total_account_value,
+    p.total_unrealized_pnl as unrealized_pnl,
+    p.total_realized_pnl as realized_pnl,
+    a.net_income
+from v_account_summary a
+join v_pnl_summary_by_account p
+    on p.account_id = a.account_id;

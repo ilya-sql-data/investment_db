@@ -64,3 +64,20 @@ create table prices (
     source_name text,
     unique (asset_id, price_date)
 );
+
+-- таблица ежедневных снимков по счету.
+-- Нужна для исторической аналитики: динамики стоимости портфеля,
+-- доходности, графиков и будущих риск-метрик.
+create table portfolio_snapshot_daily (
+    snapshot_id bigserial primary key,
+    snapshot_date date not null,
+    account_id bigint not null references accounts(account_id),
+    market_value numeric(18,2) not null default 0,
+    cash_balance numeric(18,2) not null default 0,
+    total_account_value numeric(18,2) not null default 0,
+    unrealized_pnl numeric(18,2) not null default 0,
+    realized_pnl numeric(18,2) not null default 0,
+    net_income numeric(18,2) not null default 0,
+    created_at timestamp not null default now(),
+    unique (snapshot_date, account_id)
+);
